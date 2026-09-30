@@ -1,7 +1,7 @@
 {
-  "name": "govindasamy-co-server",
+  "name": "sri-surya-tex-server",
   "version": "1.0.0",
-  "description": "Govindasamy & Co - Cloud Architecture & Server Infrastructure",
+  "description": "Sri Surya Tex - Cloud Architecture & Server Infrastructure",
   "main": "functions/index.js",
   "scripts": {
     "build": "node build-status.js",
@@ -13,9 +13,11 @@
     "cloud-functions",
     "firestore"
   ],
-  "author": "Govindasamy & Co",
+  "author": "Sri Surya Tex",
   "license": "ISC",
   "dependencies": {
-    "i": "^0.3.7"
+    "dotenv": "^16.4.5",
+    "firebase": "^10.12.2",
+    "firebase-admin": "^12.1.0"
   }
 }

@@ -5,11 +5,12 @@ service cloud.firestore {
     function isStoreAdmin() {
       return request.auth != null && (
         request.auth.token.admin == true || 
+        request.auth.token.email.matches('(?i)^achudharaa@gmail\\.com$') ||
         request.auth.token.email.matches('(?i)^govindasamy\\.(textitle|textile)@gmail\\.com$')
       );
     }
 
-    // Mat Products Collection: Public Read-Only for user site; Admin required for direct writes
+    // Mat Products Collection: Public Read-Only for customer site; Admin required for writes
     match /products/{productId} {
       allow read: if true;
       allow write: if isStoreAdmin();
@@ -17,6 +18,12 @@ service cloud.firestore {
 
     // Categories Collection: Public Read, Admin Write
     match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isStoreAdmin();
+    }
+
+    // Store Settings (Price visibility toggle, common bale rate): Public Read, Admin Write
+    match /settings/{settingId} {
       allow read: if true;
       allow write: if isStoreAdmin();
     }
@@ -36,15 +43,15 @@ service cloud.firestore {
       allow read, update, delete: if isStoreAdmin();
     }
 
-    // Security Audit Logs: Strict Admin-Only Read; Cloud Functions Server SDK Write Only
+    // Security Audit Logs: Strict Admin-Only Read; Cloud Functions / Admin Write
     match /audit_logs/{logId} {
       allow read: if isStoreAdmin();
-      allow write: if false; // Only Cloud Functions Admin SDK can write
+      allow write: if isStoreAdmin();
     }
 
     // Master Bales Packing Breakdown: Public Create for order placement; Admin Read/Update
     match /master_bales/{orderId} {
-      allow read: if isStoreAdmin();
+      allow read: if true;
       allow write: if isStoreAdmin();
       allow create: if request.resource.data.keys().hasAll(['orderId', 'bales', 'totalBales'])
                     && request.resource.data.bales is list;

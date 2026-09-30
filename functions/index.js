@@ -32,7 +32,14 @@ function loadEnv() {
 loadEnv();
 
 if (!admin.apps.length) {
-  admin.initializeApp();
+  const adminOptions = {};
+  if (process.env.FIREBASE_PROJECT_ID) {
+    adminOptions.projectId = process.env.FIREBASE_PROJECT_ID;
+  }
+  if (process.env.FIREBASE_STORAGE_BUCKET) {
+    adminOptions.storageBucket = process.env.FIREBASE_STORAGE_BUCKET;
+  }
+  admin.initializeApp(adminOptions);
 }
 
 const db = admin.firestore();
@@ -80,10 +87,19 @@ async function logSecurityAudit(action, adminUid, adminEmail, details) {
 exports.addProduct = onCall(async (request) => {
   verifyAdminClaim(request);
 
-  const { title, category, baseRate, unit, bundlePieces, bundlesPerPack, minOrderNotice, description, imageUrl, stockQty, seasonNotice } = request.data;
+  const { title, category, baseRate, unit, bundlePieces, bundlesPerPack, minOrderNotice, description, imageUrl, images, stockQty, seasonNotice } = request.data;
 
   if (!title || !category || isNaN(baseRate)) {
     throw new HttpsError("invalid-argument", "Missing required product fields.");
+  }
+
+  let finalImages = [];
+  if (Array.isArray(images) && images.length > 0) {
+    finalImages = images.slice(0, 4).map((u) => String(u).trim()).filter(Boolean);
+  } else if (imageUrl) {
+    finalImages = [String(imageUrl).trim()];
+  } else {
+    finalImages = ["/assets/logo.png"];
   }
 
   const productData = {
@@ -96,7 +112,8 @@ exports.addProduct = onCall(async (request) => {
     compressibility: 0.80,
     minOrderNotice: String(minOrderNotice || "").trim(),
     description: String(description || "").trim(),
-    imageUrl: String(imageUrl || "/assets/logo.jpg").trim(),
+    imageUrl: finalImages[0] || "/assets/logo.png",
+    images: finalImages,
     stockQty: Number(stockQty !== undefined ? stockQty : 100),
     seasonNotice: String(seasonNotice || "Price may differ based on the season item or the stock quantity").trim(),
     createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -126,6 +143,7 @@ const ALLOWED_PRODUCT_FIELDS = [
   "minOrderNotice",
   "description",
   "imageUrl",
+  "images",
   "stockQty",
   "seasonNotice",
   "isDisabled",
@@ -171,6 +189,14 @@ exports.updateProduct = onCall(async (request) => {
         sanitizedUpdate[field] = Number(updateData[field]);
       } else if (field === "isDisabled" || field === "inStock") {
         sanitizedUpdate[field] = Boolean(updateData[field]);
+      } else if (field === "images") {
+        if (Array.isArray(updateData.images)) {
+          const validImgs = updateData.images.slice(0, 4).map((u) => String(u).trim()).filter(Boolean);
+          sanitizedUpdate.images = validImgs;
+          if (validImgs[0] && !updateData.imageUrl) {
+            sanitizedUpdate.imageUrl = validImgs[0];
+          }
+        }
       } else {
         sanitizedUpdate[field] = String(updateData[field]).trim();
       }
@@ -321,7 +347,83 @@ exports.packOrder = onCall(async (request) => {
 // ==========================================================================
 const http = require("http");
 
-const server = http.createServer((req, res) => {
+const DATA_DIR = path.join(__dirname, "..", "data");
+if (!fs.existsSync(DATA_DIR)) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+}
+const PRODUCTS_FILE = path.join(DATA_DIR, "products.json");
+const CONFIG_FILE = path.join(DATA_DIR, "store_config.json");
+
+function getStoredProducts() {
+  if (fs.existsSync(PRODUCTS_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(PRODUCTS_FILE, "utf-8"));
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (_) {}
+  }
+  return [];
+}
+
+function saveStoredProducts(list) {
+  try {
+    fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(list, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("Failed to write products.json:", e.message);
+  }
+}
+
+function getStoredConfig() {
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+    } catch (_) {}
+  }
+  return { hidePrices: true, masterBaleRate: 100 };
+}
+
+function saveStoredConfig(cfg) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("Failed to write store_config.json:", e.message);
+  }
+}
+
+const sseClients = [];
+function broadcastSse(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  for (let i = sseClients.length - 1; i >= 0; i--) {
+    try {
+      sseClients[i].write(msg);
+    } catch (_) {
+      sseClients.splice(i, 1);
+    }
+  }
+}
+
+function parseJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 15 * 1024 * 1024) {
+        req.destroy();
+        reject(new Error("Request payload too large"));
+      }
+    });
+    req.on("end", () => {
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch (err) {
+        resolve({});
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
   // Global CORS Headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -335,6 +437,128 @@ const server = http.createServer((req, res) => {
 
   const urlPath = req.url.split("?")[0];
   const wantsJson = req.url.includes("format=json") || (req.headers.accept && req.headers.accept.includes("application/json") && !req.headers.accept.includes("text/html"));
+
+  // 1. Real-Time Server-Sent Events (SSE) Stream
+  if (urlPath === "/api/events") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    });
+    res.write(`data: ${JSON.stringify({ type: "CONNECTED", time: new Date().toISOString() })}\n\n`);
+    sseClients.push(res);
+    req.on("close", () => {
+      const idx = sseClients.indexOf(res);
+      if (idx !== -1) sseClients.splice(idx, 1);
+    });
+    return;
+  }
+
+  // 2. Centralized Products API
+  if (urlPath === "/api/products") {
+    if (req.method === "GET") {
+      const products = getStoredProducts();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(products));
+      return;
+    }
+
+    if (req.method === "POST") {
+      try {
+        const body = await parseJsonBody(req);
+        const newProd = {
+          id: body.id || `prod_${Date.now()}`,
+          ...body,
+          createdAt: body.createdAt || new Date().toISOString()
+        };
+        const current = getStoredProducts();
+        const updated = [newProd, ...current.filter((p) => p.id !== newProd.id)];
+        saveStoredProducts(updated);
+        broadcastSse({ type: "PRODUCT_ADDED", product: newProd });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, product: newProd }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+  }
+
+  // 3. Product Single Resource Update / Delete API
+  if (urlPath.startsWith("/api/products/")) {
+    const prodId = decodeURIComponent(urlPath.replace("/api/products/", ""));
+    const current = getStoredProducts();
+
+    if (req.method === "PUT" || req.method === "POST") {
+      try {
+        const body = await parseJsonBody(req);
+        const updatedList = current.map((p) => (p.id === prodId ? { ...p, ...body } : p));
+        saveStoredProducts(updatedList);
+        const updatedProd = updatedList.find((p) => p.id === prodId) || { id: prodId, ...body };
+        broadcastSse({ type: "PRODUCT_UPDATED", product: updatedProd });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, product: updatedProd }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (req.method === "DELETE") {
+      const filtered = current.filter((p) => p.id !== prodId);
+      saveStoredProducts(filtered);
+      broadcastSse({ type: "PRODUCT_DELETED", productId: prodId });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, productId: prodId }));
+      return;
+    }
+  }
+
+  // 4. Store Config API (Customer Price Visibility)
+  if (urlPath === "/api/settings/store_config") {
+    if (req.method === "GET") {
+      const cfg = getStoredConfig();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(cfg));
+      return;
+    }
+
+    if (req.method === "POST" || req.method === "PUT") {
+      try {
+        const body = await parseJsonBody(req);
+        const current = getStoredConfig();
+        const merged = { ...current, ...body, updatedAt: new Date().toISOString() };
+        saveStoredConfig(merged);
+        broadcastSse({ type: "STORE_CONFIG_UPDATED", hidePrices: merged.hidePrices, config: merged });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, config: merged }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+  }
+
+  // 5. Wholesale Orders API (SSE Broadcast)
+  if (urlPath === "/api/orders") {
+    if (req.method === "POST") {
+      try {
+        const body = await parseJsonBody(req);
+        const orderId = body.id || `ord_${Date.now()}`;
+        const newOrder = { id: orderId, ...body, createdAt: body.createdAt || new Date().toISOString() };
+        broadcastSse({ type: "ORDER_PLACED", order: newOrder });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, order: newOrder }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+  }
 
   // Serve Visual Health Report / HTML Dashboard for root, /health, /status, /report
   if ((urlPath === "/" || urlPath === "/health" || urlPath === "/status" || urlPath === "/report") && !wantsJson) {
@@ -358,7 +582,7 @@ const server = http.createServer((req, res) => {
     res.end(
       JSON.stringify({
         status: "LIVE",
-        service: "Govindasamy & Co - Cloud Architecture & API Server",
+        service: "Sri Surya Tex - Cloud Architecture & API Server",
         timestamp: new Date().toISOString(),
         cloudDatabase: "Firestore",
         cloudStorage: "Firebase Storage",
@@ -375,7 +599,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
-        project: "govindasamyandco",
+        project: process.env.FIREBASE_PROJECT_ID || "surya-tex",
         status: "OPERATIONAL",
         nodeVersion: process.version,
         platform: process.platform,
@@ -388,18 +612,27 @@ const server = http.createServer((req, res) => {
           heapTotalMb: parseFloat((mem.heapTotal / 1024 / 1024).toFixed(2)),
           externalMb: parseFloat((mem.external / 1024 / 1024).toFixed(2))
         },
+        company: {
+          name: "SRI SURYA TEX",
+          proprietor: "P. MYILSAMY",
+          mobile: "98426 86264",
+          gstin: "33DBQPM1973N1ZY",
+          address: "185, Eswaran Kovil Kidangu Street, ERODE - 638 001",
+          categories: ["Handloom Mats", "Rubber Mats", "Fancy Mats", "Bed Spreads"]
+        },
         services: {
-          firestore: "ACTIVE",
-          firebaseStorage: "ACTIVE",
-          cloudFunctions: "ACTIVE (v2)",
+          firestore: "ACTIVE (Real-time Cloud Database)",
+          firebaseStorage: "ACTIVE (2 to 4 Multi-Photo Assets)",
+          cloudFunctions: "ACTIVE (v2 Serverless)",
           packingEngine: "BEST_FIT_DECREASING_120_UNITS",
           securityRules: "ENFORCED",
-          mfaAuthentication: "ENABLED (TOTP + Google Auth)"
+          adminAuthentication: "ACTIVE (Visiting Card Mobile + Email + Custom Password)",
+          priceVisibilityControl: "ENFORCED (Wholesale Indent & Zero Price Trace)"
         },
         portals: {
-          customerPortalUrl: process.env.CLIENT_USER_URL || "https://govindasamyandco.web.app",
-          ownerPortalUrl: process.env.CLIENT_OWNER_URL || "https://govindasamy-admin.web.app",
-          serverUrl: process.env.SERVER_URL || "https://gs-co-server.onrender.com"
+          customerPortalUrl: process.env.CLIENT_USER_URL || (process.env.FIREBASE_PROJECT_ID ? `https://${process.env.FIREBASE_PROJECT_ID}.web.app` : "http://localhost:3001"),
+          ownerPortalUrl: process.env.CLIENT_OWNER_URL || (process.env.FIREBASE_PROJECT_ID ? `https://${process.env.FIREBASE_PROJECT_ID}-admin.web.app` : "http://localhost:3000"),
+          serverUrl: process.env.SERVER_URL || `http://localhost:${process.env.PORT || 10000}`
         },
         functions: ["addProduct", "updateProduct", "deleteProduct", "packOrder", "logSecurityAudit"],
         endpoints: ["/health", "/api/status", "/api/telemetry", "/api/pack-preview", "/report"]
@@ -462,7 +695,7 @@ const server = http.createServer((req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>404 Not Found — Govindasamy & Co</title>
+  <title>404 Not Found — Sri Surya Tex</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet">
@@ -551,7 +784,7 @@ const server = http.createServer((req, res) => {
 if (require.main === module || process.env.PORT) {
   const PORT = process.env.PORT || 10000;
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Govindasamy & Co Server listening on port ${PORT}`);
+    console.log(`🚀 Sri Surya Tex Server listening on port ${PORT}`);
     console.log(`📡 Health check ready at: http://localhost:${PORT}/health`);
     console.log(`📊 Server Dashboard ready at: http://localhost:${PORT}/`);
   });

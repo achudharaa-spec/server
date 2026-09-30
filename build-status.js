@@ -27,16 +27,16 @@ if (!fs.existsSync(publicDir)) {
   fs.mkdirSync(publicDir, { recursive: true });
 }
 
-const userUrl = process.env.CLIENT_USER_URL || 'https://govindasamyandco.web.app';
-const ownerUrl = process.env.CLIENT_OWNER_URL || 'https://govindasamy-admin.web.app';
-const serverUrl = process.env.SERVER_URL || 'https://gs-co-server.onrender.com';
+const userUrl = process.env.CLIENT_USER_URL || (process.env.FIREBASE_PROJECT_ID ? `https://${process.env.FIREBASE_PROJECT_ID}.web.app` : 'http://localhost:5173');
+const ownerUrl = process.env.CLIENT_OWNER_URL || (process.env.FIREBASE_PROJECT_ID ? `https://${process.env.FIREBASE_PROJECT_ID}-admin.web.app` : 'http://localhost:5174');
+const serverUrl = process.env.SERVER_URL || `http://localhost:${process.env.PORT || 10000}`;
 
 const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Govindasamy & Co — Cloud Server & Telemetry Dashboard</title>
+  <title>Sri Surya Tex — Cloud Server & Telemetry Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -443,7 +443,7 @@ const html = `<!DOCTYPE html>
           <i class="fa-solid fa-server"></i>
         </div>
         <div class="brand-titles">
-          <h1>Govindasamy & Co — Cloud API & Server Telemetry</h1>
+          <h1>Sri Surya Tex — Cloud API & Server Telemetry</h1>
           <p>Real-Time Firebase Serverless Backend & Master Bale Algorithm Engine</p>
         </div>
       </div>
@@ -631,7 +631,7 @@ const html = `<!DOCTYPE html>
     </section>
 
     <footer class="footer-text">
-      Govindasamy & Co • Centralized Enterprise Backend Architecture • Render Web Service
+      Sri Surya Tex • Centralized Enterprise Backend Architecture • Render Web Service
     </footer>
   </div>
 

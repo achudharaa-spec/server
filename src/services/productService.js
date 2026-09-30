@@ -55,19 +55,25 @@ export async function getProducts() {
  */
 export async function addProduct(productData) {
   try {
+    const images = Array.isArray(productData.images) && productData.images.length > 0
+      ? productData.images.slice(0, 4)
+      : (productData.imageUrl ? [productData.imageUrl] : []);
+
     const docRef = await addDoc(collection(db, PRODUCTS_COLLECTION), {
       title: productData.title,
       category: productData.category,
       baseRate: Number(productData.baseRate),
       unit: productData.unit,
       bundlePieces: Number(productData.bundlePieces || 0),
+      bundlesPerPack: Number(productData.bundlesPerPack || 8),
       minOrderNotice: productData.minOrderNotice || "",
       description: productData.description || "",
-      imageUrl: productData.imageUrl || "",
+      imageUrl: images[0] || productData.imageUrl || "",
+      images: images,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
-    return { id: docRef.id, ...productData };
+    return { id: docRef.id, ...productData, images, imageUrl: images[0] || productData.imageUrl };
   } catch (error) {
     console.error("Error adding product to Firestore:", error);
     throw error;
